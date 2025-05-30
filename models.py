@@ -1,101 +1,104 @@
-from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, ForeignKey, Boolean, Table, JSON
+from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, ForeignKey, Boolean, Table
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship, sessionmaker
 import datetime
 import sys
 import os
 
-# Tambahkan direktori induk ke path untuk mengimpor modul umum
+# Add parent directory to path to import common modules
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from common.config import get_db_config
 
 Base = declarative_base()
 
-class ProductionBatch(Base):
-    __tablename__ = 'production_batches'
+# Association table for many-to-many relationship between ProductionPlan and Materials
+plan_materials = Table(
+    'plan_materials',
+    Base.metadata,
+    Column('plan_id', Integer, ForeignKey('production_plans.id'), primary_key=True),
+    Column('material_id', Integer, primary_key=True),
+    Column('quantity_required', Float, nullable=False)
+)
+
+class Machine(Base):
+    __tablename__ = 'machines'
     
     id = Column(Integer, primary_key=True)
-    batch_number = Column(String(50), unique=True, nullable=False)
-    order_id = Column(String(50))  # Referensi ke pesanan marketplace
-    product_id = Column(Integer, nullable=False)  # Produk yang diproduksi
+    name = Column(String(100), nullable=False)
+    machine_type = Column(String(50))
+    status = Column(String(20), default='available')  # available, busy, maintenance, offline
+    capacity_per_hour = Column(Float)
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
+    
+    # Relationships
+    slots = relationship("MachineSlot", back_populates="machine")
+
+class MachineSlot(Base):
+    __tablename__ = 'machine_slots'
+    
+    id = Column(Integer, primary_key=True)
+    machine_id = Column(Integer, ForeignKey('machines.id'))
+    start_time = Column(DateTime, nullable=False)
+    end_time = Column(DateTime, nullable=False)
+    status = Column(String(20), default='available')  # available, reserved, in_use
+    production_plan_id = Column(Integer, ForeignKey('production_plans.id'))
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
+    
+    # Relationships
+    machine = relationship("Machine", back_populates="slots")
+    production_plan = relationship("ProductionPlan", back_populates="machine_slots")
+
+class ProductionPlan(Base):
+    __tablename__ = 'production_plans'
+    
+    id = Column(Integer, primary_key=True)
+    name = Column(String(100))
+    product_id = Column(Integer)  # External reference to product
     quantity = Column(Integer, nullable=False)
-    priority = Column(Integer, default=1)  # 1=rendah, 2=sedang, 3=tinggi
-    status = Column(String(20), default='pending')  # pending, in_progress, completed, cancelled
-    production_plan_id = Column(Integer)  # Referensi ke Layanan Perencanaan Produksi
-    scheduled_start = Column(DateTime)
-    scheduled_end = Column(DateTime)
-    actual_start = Column(DateTime)
-    actual_end = Column(DateTime)
+    priority = Column(Integer, default=1)  # 1=low, 2=medium, 3=high
+    status = Column(String(20), default='draft')  # draft, planned, in_progress, completed, cancelled
+    start_date = Column(DateTime)
+    end_date = Column(DateTime)
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
     
-    # Relasi
-    production_steps = relationship("ProductionStep", back_populates="batch")
+    # Relationships
+    machine_slots = relationship("MachineSlot", back_populates="production_plan")
+    
+    # Virtual attribute for required materials (not stored in this database)
+    # This will be fetched from Material Inventory Service
 
-class ProductionStep(Base):
-    __tablename__ = 'production_steps'
+class CapacityPlan(Base):
+    __tablename__ = 'capacity_plans'
     
     id = Column(Integer, primary_key=True)
-    batch_id = Column(Integer, ForeignKey('production_batches.id'))
-    step_number = Column(Integer)
-    name = Column(String(100), nullable=False)
-    machine_type = Column(String(50))  # Jenis mesin yang diperlukan untuk langkah ini
-    status = Column(String(20), default='pending')  # pending, in_progress, completed, skipped
-    duration_minutes = Column(Integer)  # Perkiraan durasi dalam menit
-    start_time = Column(DateTime)
-    end_time = Column(DateTime)
-    machine_queue_id = Column(Integer)  # Referensi ke Layanan Antrian Mesin
+    name = Column(String(100))
+    period_start = Column(DateTime, nullable=False)
+    period_end = Column(DateTime, nullable=False)
+    total_capacity_hours = Column(Float)
+    allocated_capacity_hours = Column(Float, default=0)
     notes = Column(String(255))
-    created_at = Column(DateTime, default=datetime.datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
-    
-    # Relasi
-    batch = relationship("ProductionBatch", back_populates="production_steps")
-    materials = relationship("StepMaterial", back_populates="step")
-
-class StepMaterial(Base):
-    __tablename__ = 'step_materials'
-    
-    id = Column(Integer, primary_key=True)
-    step_id = Column(Integer, ForeignKey('production_steps.id'))
-    material_id = Column(Integer, nullable=False)  # Referensi ke Layanan Inventori Material
-    quantity_required = Column(Float, nullable=False)
-    is_consumed = Column(Boolean, default=False)
-    created_at = Column(DateTime, default=datetime.datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
-    
-    # Relasi
-    step = relationship("ProductionStep", back_populates="materials")
-
-class ProductDefinition(Base):
-    __tablename__ = 'product_definitions'
-    
-    id = Column(Integer, primary_key=True)
-    product_id = Column(Integer, unique=True, nullable=False)  # ID produk eksternal
-    name = Column(String(100), nullable=False)
-    description = Column(String(255))
-    production_workflow = Column(JSON)  # JSON yang mendefinisikan langkah dan material
-    standard_batch_size = Column(Integer, default=1)
-    is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
 
 def init_db():
-    """Inisialisasi database dengan tabel"""
-    db_config = get_db_config("production_management")
-    connection_string = f"mysql+pymysql://{db_config['user']}:{db_config['password']}@{db_config['host']}:3308/{db_config['database']}"
+    """Initialize the database with tables"""
+    db_config = get_db_config("production_planning")
+    connection_string = f"mysql+pymysql://{db_config['user']}:{db_config['password']}@{db_config['host']}/{db_config['database']}"
     
     engine = create_engine(connection_string)
     Base.metadata.create_all(engine)
     
-    # Buat factory sesi
+    # Create a session factory
     SessionFactory = sessionmaker(bind=engine)
     return SessionFactory()
 
 def get_session():
-    """Dapatkan sesi database baru"""
-    db_config = get_db_config("production_management")
-    connection_string = f"mysql+pymysql://{db_config['user']}:{db_config['password']}@{db_config['host']}:3308/{db_config['database']}"
+    """Get a new database session"""
+    db_config = get_db_config("production_planning")
+    connection_string = f"mysql+pymysql://{db_config['user']}:{db_config['password']}@{db_config['host']}/{db_config['database']}"
     
     engine = create_engine(connection_string)
     SessionFactory = sessionmaker(bind=engine)

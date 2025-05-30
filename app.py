@@ -5,27 +5,27 @@ import os
 import sys
 import pymysql
 
-# Tambahkan direktori induk ke path untuk mengimpor modul umum
+# Add parent directory to path to import common modules
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from common.config import get_db_config
 
-# Impor skema dan model
+# Import schema and models
 from schema import schema
 from models import init_db
 
-# Inisialisasi aplikasi Flask
+# Initialize Flask app
 app = Flask(__name__)
 CORS(app)
 
-# Konfigurasi aplikasi
-service_name = "production_management"
-port = int(os.getenv(f"{service_name.upper()}_PORT", 5001))
+# Configure the app
+service_name = "production_planning"
+port = int(os.getenv(f"{service_name.upper()}_PORT", 5002))
 
 @app.route('/')
 def index():
     return jsonify({
-        "service": "Layanan Manajemen Produksi",
-        "status": "berjalan",
+        "service": "Production Planning Service",
+        "status": "running",
         "endpoints": {
             "graphql": "/graphql",
             "health": "/health"
@@ -35,25 +35,25 @@ def index():
 @app.route('/health')
 def health():
     return jsonify({
-        "status": "sehat",
-        "service": "Layanan Manajemen Produksi"
+        "status": "healthy",
+        "service": "Production Planning Service"
     })
 
-# Tambahkan endpoint GraphQL
+# Add GraphQL endpoint
 app.add_url_rule(
     '/graphql',
     view_func=GraphQLView.as_view(
         'graphql',
         schema=schema,
-        graphiql=True  # Aktifkan GraphiQL untuk pengujian yang mudah
+        graphiql=True  # Enable GraphiQL for easy testing
     )
 )
 
 def create_database():
-    """Buat database jika belum ada"""
+    """Create the database if it doesn't exist"""
     db_config = get_db_config(service_name)
     
-    # Koneksi ke MySQL tanpa menentukan database
+    # Connect to MySQL without specifying the database
     connection = pymysql.connect(
         host=db_config['host'],
         user=db_config['user'],
@@ -63,21 +63,21 @@ def create_database():
     
     try:
         with connection.cursor() as cursor:
-            # Buat database jika belum ada
+            # Create the database if it doesn't exist
             cursor.execute(f"CREATE DATABASE IF NOT EXISTS {db_config['database']} CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci")
         connection.commit()
     finally:
         connection.close()
 
 if __name__ == '__main__':
-    # Buat database jika belum ada
+    # Create database if it doesn't exist
     try:
         create_database()
-        # Inisialisasi tabel database
+        # Initialize database tables
         init_db()
-        print(f"Database '{get_db_config(service_name)['database']}' dan tabel berhasil diinisialisasi")
+        print(f"Database '{get_db_config(service_name)['database']}' and tables initialized successfully")
     except Exception as e:
-        print(f"Error saat menginisialisasi database: {e}")
+        print(f"Error initializing database: {e}")
     
-    # Jalankan aplikasi Flask
+    # Run the Flask app
     app.run(host='0.0.0.0', port=port, debug=True)

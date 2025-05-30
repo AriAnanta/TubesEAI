@@ -1,7 +1,7 @@
 import graphene
 from graphene import relay
 from graphene_sqlalchemy import SQLAlchemyObjectType, SQLAlchemyConnectionField
-from models import ProductionBatch, ProductionStep, StepMaterial, ProductDefinition, get_session
+from models import Machine, MachineSlot, ProductionPlan, CapacityPlan, get_session
 from sqlalchemy import desc, and_
 import datetime
 import requests
@@ -9,682 +9,596 @@ import json
 import sys
 import os
 
-# Tambahkan direktori induk ke path untuk mengimpor modul umum
+# Add parent directory to path to import common modules
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from common.config import GRAPHQL_ENDPOINTS
 
-# Definisikan tipe GraphQL
-class ProductionBatchType(SQLAlchemyObjectType):
+# Define GraphQL types
+class MachineType(SQLAlchemyObjectType):
     class Meta:
-        model = ProductionBatch
+        model = Machine
         interfaces = (relay.Node, )
 
-class ProductionStepType(SQLAlchemyObjectType):
+class MachineSlotType(SQLAlchemyObjectType):
     class Meta:
-        model = ProductionStep
+        model = MachineSlot
         interfaces = (relay.Node, )
 
-class StepMaterialType(SQLAlchemyObjectType):
+class ProductionPlanType(SQLAlchemyObjectType):
     class Meta:
-        model = StepMaterial
+        model = ProductionPlan
+        interfaces = (relay.Node, )
+    
+    # Add custom field for materials
+    required_materials = graphene.List(graphene.String)
+    
+    def resolve_required_materials(self, info):
+        # This would typically call the Material Inventory Service GraphQL API
+        # For now, we'll return a placeholder
+        return [f"Material {i} for Plan {self.id}" for i in range(1, 4)]
+
+class CapacityPlanType(SQLAlchemyObjectType):
+    class Meta:
+        model = CapacityPlan
         interfaces = (relay.Node, )
 
-class ProductDefinitionType(SQLAlchemyObjectType):
-    class Meta:
-        model = ProductDefinition
-        interfaces = (relay.Node, )
-
-# Tipe input untuk mutasi
-class ProductionBatchInput(graphene.InputObjectType):
-    order_id = graphene.String()
-    product_id = graphene.Int(required=True)
-    quantity = graphene.Int(required=True)
-    priority = graphene.Int()
-    production_plan_id = graphene.Int()
-    scheduled_start = graphene.DateTime()
-    scheduled_end = graphene.DateTime()
-
-class ProductionStepInput(graphene.InputObjectType):
-    batch_id = graphene.Int(required=True)
-    step_number = graphene.Int(required=True)
+# Input types for mutations
+class MachineInput(graphene.InputObjectType):
     name = graphene.String(required=True)
     machine_type = graphene.String()
     status = graphene.String()
-    duration_minutes = graphene.Int()
-    start_time = graphene.DateTime()
-    end_time = graphene.DateTime()
-    machine_queue_id = graphene.Int()
+    capacity_per_hour = graphene.Float()
+
+class MachineSlotInput(graphene.InputObjectType):
+    machine_id = graphene.Int(required=True)
+    start_time = graphene.DateTime(required=True)
+    end_time = graphene.DateTime(required=True)
+    status = graphene.String()
+    production_plan_id = graphene.Int()
+
+class ProductionPlanInput(graphene.InputObjectType):
+    name = graphene.String()
+    product_id = graphene.Int(required=True)
+    quantity = graphene.Int(required=True)
+    priority = graphene.Int()
+    status = graphene.String()
+    start_date = graphene.DateTime()
+    end_date = graphene.DateTime()
+    material_requirements = graphene.List(graphene.String)  # Format: "material_id:quantity"
+
+class CapacityPlanInput(graphene.InputObjectType):
+    name = graphene.String()
+    period_start = graphene.DateTime(required=True)
+    period_end = graphene.DateTime(required=True)
+    total_capacity_hours = graphene.Float()
+    allocated_capacity_hours = graphene.Float()
     notes = graphene.String()
 
-class StepMaterialInput(graphene.InputObjectType):
-    step_id = graphene.Int(required=True)
-    material_id = graphene.Int(required=True)
-    quantity_required = graphene.Float(required=True)
-    is_consumed = graphene.Boolean()
-
-class ProductDefinitionInput(graphene.InputObjectType):
-    product_id = graphene.Int(required=True)
-    name = graphene.String(required=True)
-    description = graphene.String()
-    production_workflow = graphene.JSONString()
-    standard_batch_size = graphene.Int()
-    is_active = graphene.Boolean()
-
-# Fungsi pembantu untuk berinteraksi dengan layanan lain
-def get_production_plan(plan_id):
-    """Mendapatkan detail rencana produksi dari Layanan Perencanaan Produksi"""
+# Check material availability from Material Inventory Service
+def check_material_availability(material_id, quantity_needed):
     try:
+        # GraphQL query to check material availability
         query = """
         query($id: Int!) {
-            productionPlan(id: $id) {
+            material(id: $id) {
                 id
                 name
-                startDate
-                endDate
-                status
+                quantity
             }
         }
         """
-        variables = {"id": plan_id}
+        variables = {"id": material_id}
         
-        # Buat permintaan ke Layanan Perencanaan Produksi
+        # Make request to Material Inventory Service
         response = requests.post(
-            GRAPHQL_ENDPOINTS["production_planning"],
+            GRAPHQL_ENDPOINTS["material_inventory"],
             json={"query": query, "variables": variables}
         )
         
         data = response.json()
-        if 'data' in data and 'productionPlan' in data['data']:
-            return data['data']['productionPlan']
-        return None
+        if 'data' in data and 'material' in data['data'] and data['data']['material']:
+            available_quantity = data['data']['material']['quantity']
+            return available_quantity >= quantity_needed
+        
+        return False
     except Exception as e:
-        print(f"Error saat mengambil rencana produksi: {e}")
-        return None
+        print(f"Error checking material availability: {e}")
+        return False
 
-def add_to_machine_queue(step_id, machine_type, start_time, duration_minutes):
-    """Menambahkan langkah produksi ke antrian mesin"""
-    try:
-        mutation = """
-        mutation($input: AddToQueueInput!) {
-            addToQueue(input: $input) {
-                machineQueueItem {
-                    id
-                }
-                success
-                message
-            }
-        }
-        """
-        variables = {
-            "input": {
-                "productionStepId": step_id,
-                "machineType": machine_type,
-                "startTime": start_time.isoformat() if start_time else None,
-                "durationMinutes": duration_minutes
-            }
-        }
-        
-        # Buat permintaan ke Layanan Antrian Mesin
-        response = requests.post(
-            GRAPHQL_ENDPOINTS["machine_queue"],
-            json={"query": mutation, "variables": variables}
-        )
-        
-        data = response.json()
-        if 'data' in data and 'addToQueue' in data['data']:
-            return data['data']['addToQueue']
-        return None
-    except Exception as e:
-        print(f"Error saat menambah ke antrian mesin: {e}")
-        return None
-
-def update_material_inventory(material_id, quantity, transaction_type, reference):
-    """Memperbarui inventori material ketika material dikonsumsi"""
-    try:
-        mutation = """
-        mutation($input: MaterialTransactionInput!) {
-            createMaterialTransaction(input: $input) {
-                materialTransaction {
-                    id
-                }
-                material {
-                    id
-                    quantity
-                }
-            }
-        }
-        """
-        variables = {
-            "input": {
-                "materialId": material_id,
-                "transactionType": transaction_type,
-                "quantity": quantity,
-                "reference": reference
-            }
-        }
-        
-        # Buat permintaan ke Layanan Inventori Material
-        response = requests.post(
-            GRAPHQL_ENDPOINTS["material_inventory"],
-            json={"query": mutation, "variables": variables}
-        )
-        
-        data = response.json()
-        if 'data' in data and 'createMaterialTransaction' in data['data']:
-            return data['data']['createMaterialTransaction']
-        return None
-    except Exception as e:
-        print(f"Error saat memperbarui inventori material: {e}")
-        return None
-
-def send_production_feedback(batch_id, status, completion_percentage, quality_data=None):
-    """Mengirim pembaruan status produksi ke Layanan Umpan Balik Produksi"""
-    try:
-        mutation = """
-        mutation($input: ProductionFeedbackInput!) {
-            createProductionFeedback(input: $input) {
-                productionFeedback {
-                    id
-                }
-                success
-                message
-            }
-        }
-        """
-        variables = {
-            "input": {
-                "batchId": batch_id,
-                "status": status,
-                "completionPercentage": completion_percentage,
-                "qualityData": json.dumps(quality_data) if quality_data else None
-            }
-        }
-        
-        # Buat permintaan ke Layanan Umpan Balik Produksi
-        response = requests.post(
-            GRAPHQL_ENDPOINTS["production_feedback"],
-            json={"query": mutation, "variables": variables}
-        )
-        
-        data = response.json()
-        if 'data' in data and 'createProductionFeedback' in data['data']:
-            return data['data']['createProductionFeedback']
-        return None
-    except Exception as e:
-        print(f"Error saat mengirim umpan balik produksi: {e}")
-        return None
-
-# Mutasi
-class CreateProductionBatch(graphene.Mutation):
+# Mutations
+class CreateMachine(graphene.Mutation):
     class Arguments:
-        input = ProductionBatchInput(required=True)
+        input = MachineInput(required=True)
     
-    production_batch = graphene.Field(lambda: ProductionBatchType)
+    machine = graphene.Field(lambda: MachineType)
+    
+    def mutate(self, info, input):
+        session = get_session()
+        machine = Machine(
+            name=input.name,
+            machine_type=input.machine_type,
+            status=input.status or 'available',
+            capacity_per_hour=input.capacity_per_hour
+        )
+        session.add(machine)
+        session.commit()
+        session.refresh(machine)
+        session.close()
+        return CreateMachine(machine=machine)
+
+class UpdateMachine(graphene.Mutation):
+    class Arguments:
+        id = graphene.Int(required=True)
+        input = MachineInput(required=True)
+    
+    machine = graphene.Field(lambda: MachineType)
+    
+    def mutate(self, info, id, input):
+        session = get_session()
+        machine = session.query(Machine).filter(Machine.id == id).first()
+        
+        if machine:
+            machine.name = input.name
+            machine.machine_type = input.machine_type
+            machine.status = input.status or machine.status
+            machine.capacity_per_hour = input.capacity_per_hour
+            
+            session.commit()
+            session.refresh(machine)
+        
+        session.close()
+        return UpdateMachine(machine=machine)
+
+class DeleteMachine(graphene.Mutation):
+    class Arguments:
+        id = graphene.Int(required=True)
+    
+    success = graphene.Boolean()
+    
+    def mutate(self, info, id):
+        session = get_session()
+        machine = session.query(Machine).filter(Machine.id == id).first()
+        
+        if machine:
+            session.delete(machine)
+            session.commit()
+            success = True
+        else:
+            success = False
+        
+        session.close()
+        return DeleteMachine(success=success)
+
+class CreateMachineSlot(graphene.Mutation):
+    class Arguments:
+        input = MachineSlotInput(required=True)
+    
+    machine_slot = graphene.Field(lambda: MachineSlotType)
+    
+    def mutate(self, info, input):
+        session = get_session()
+        
+        # Check if the machine exists
+        machine = session.query(Machine).filter(Machine.id == input.machine_id).first()
+        if not machine:
+            raise Exception(f"Machine with ID {input.machine_id} not found")
+        
+        # Check if there's any overlap with existing slots
+        overlapping_slots = session.query(MachineSlot).filter(
+            MachineSlot.machine_id == input.machine_id,
+            MachineSlot.start_time < input.end_time,
+            MachineSlot.end_time > input.start_time
+        ).all()
+        
+        if overlapping_slots:
+            raise Exception("The requested time slot overlaps with existing slots")
+        
+        # Create new slot
+        machine_slot = MachineSlot(
+            machine_id=input.machine_id,
+            start_time=input.start_time,
+            end_time=input.end_time,
+            status=input.status or 'available',
+            production_plan_id=input.production_plan_id
+        )
+        session.add(machine_slot)
+        session.commit()
+        session.refresh(machine_slot)
+        session.close()
+        return CreateMachineSlot(machine_slot=machine_slot)
+
+class UpdateMachineSlot(graphene.Mutation):
+    class Arguments:
+        id = graphene.Int(required=True)
+        input = MachineSlotInput(required=True)
+    
+    machine_slot = graphene.Field(lambda: MachineSlotType)
+    
+    def mutate(self, info, id, input):
+        session = get_session()
+        machine_slot = session.query(MachineSlot).filter(MachineSlot.id == id).first()
+        
+        if machine_slot:
+            # Check for overlaps if changing times
+            if input.start_time != machine_slot.start_time or input.end_time != machine_slot.end_time:
+                overlapping_slots = session.query(MachineSlot).filter(
+                    MachineSlot.machine_id == input.machine_id,
+                    MachineSlot.id != id,
+                    MachineSlot.start_time < input.end_time,
+                    MachineSlot.end_time > input.start_time
+                ).all()
+                
+                if overlapping_slots:
+                    raise Exception("The requested time slot overlaps with existing slots")
+            
+            machine_slot.machine_id = input.machine_id
+            machine_slot.start_time = input.start_time
+            machine_slot.end_time = input.end_time
+            machine_slot.status = input.status or machine_slot.status
+            machine_slot.production_plan_id = input.production_plan_id
+            
+            session.commit()
+            session.refresh(machine_slot)
+        
+        session.close()
+        return UpdateMachineSlot(machine_slot=machine_slot)
+
+class DeleteMachineSlot(graphene.Mutation):
+    class Arguments:
+        id = graphene.Int(required=True)
+    
+    success = graphene.Boolean()
+    
+    def mutate(self, info, id):
+        session = get_session()
+        machine_slot = session.query(MachineSlot).filter(MachineSlot.id == id).first()
+        
+        if machine_slot:
+            session.delete(machine_slot)
+            session.commit()
+            success = True
+        else:
+            success = False
+        
+        session.close()
+        return DeleteMachineSlot(success=success)
+
+class CreateProductionPlan(graphene.Mutation):
+    class Arguments:
+        input = ProductionPlanInput(required=True)
+    
+    production_plan = graphene.Field(lambda: ProductionPlanType)
     success = graphene.Boolean()
     message = graphene.String()
     
     def mutate(self, info, input):
         session = get_session()
         
-        # Buat nomor batch
-        batch_number = f"BATCH-{datetime.datetime.now().strftime('%Y%m%d')}-{input.product_id}-{input.quantity}"
-        
-        # Periksa rencana produksi jika disediakan
-        if input.production_plan_id:
-            plan = get_production_plan(input.production_plan_id)
-            if not plan:
-                return CreateProductionBatch(
-                    production_batch=None,
+        # Check material requirements if provided
+        if hasattr(input, 'material_requirements') and input.material_requirements:
+            all_materials_available = True
+            for material_req in input.material_requirements:
+                material_id, quantity = map(int, material_req.split(':'))
+                if not check_material_availability(material_id, quantity):
+                    all_materials_available = False
+                    break
+            
+            if not all_materials_available:
+                return CreateProductionPlan(
+                    production_plan=None,
                     success=False,
-                    message=f"Rencana produksi dengan ID {input.production_plan_id} tidak ditemukan"
+                    message="Not all required materials are available in sufficient quantities"
                 )
         
-        # Buat batch produksi
-        batch = ProductionBatch(
-            batch_number=batch_number,
-            order_id=input.order_id,
+        # Create production plan
+        production_plan = ProductionPlan(
+            name=input.name or f"Plan for Product {input.product_id}",
             product_id=input.product_id,
             quantity=input.quantity,
             priority=input.priority or 1,
-            status='pending',
-            production_plan_id=input.production_plan_id,
-            scheduled_start=input.scheduled_start,
-            scheduled_end=input.scheduled_end
+            status=input.status or 'draft',
+            start_date=input.start_date,
+            end_date=input.end_date
         )
-        
-        session.add(batch)
+        session.add(production_plan)
         session.commit()
-        session.refresh(batch)
-        
-        # Dapatkan definisi produk untuk membuat langkah-langkah
-        product_def = session.query(ProductDefinition).filter(ProductDefinition.product_id == input.product_id).first()
-        
-        if product_def and product_def.production_workflow:
-            try:
-                workflow = json.loads(product_def.production_workflow) if isinstance(product_def.production_workflow, str) else product_def.production_workflow
-                
-                # Buat langkah produksi berdasarkan alur kerja
-                for step_index, step_def in enumerate(workflow.get('steps', [])):
-                    step = ProductionStep(
-                        batch_id=batch.id,
-                        step_number=step_index + 1,
-                        name=step_def.get('name', f"Langkah {step_index + 1}"),
-                        machine_type=step_def.get('machine_type'),
-                        status='pending',
-                        duration_minutes=step_def.get('duration_minutes')
-                    )
-                    session.add(step)
-                    session.flush()  # Dapatkan ID langkah
-                    
-                    # Tambahkan material untuk langkah
-                    for material in step_def.get('materials', []):
-                        step_material = StepMaterial(
-                            step_id=step.id,
-                            material_id=material.get('material_id'),
-                            quantity_required=material.get('quantity') * input.quantity
-                        )
-                        session.add(step_material)
-                
-                session.commit()
-            except Exception as e:
-                print(f"Error saat membuat langkah produksi: {e}")
-        
+        session.refresh(production_plan)
         session.close()
         
-        # Kirim umpan balik awal ke Layanan Umpan Balik Produksi
-        send_production_feedback(batch.id, 'pending', 0)
-        
-        return CreateProductionBatch(
-            production_batch=batch,
+        return CreateProductionPlan(
+            production_plan=production_plan,
             success=True,
-            message="Batch produksi berhasil dibuat"
+            message="Production plan created successfully"
         )
 
-class UpdateProductionBatch(graphene.Mutation):
+class UpdateProductionPlan(graphene.Mutation):
     class Arguments:
         id = graphene.Int(required=True)
-        input = ProductionBatchInput(required=True)
+        input = ProductionPlanInput(required=True)
     
-    production_batch = graphene.Field(lambda: ProductionBatchType)
+    production_plan = graphene.Field(lambda: ProductionPlanType)
     success = graphene.Boolean()
     message = graphene.String()
     
     def mutate(self, info, id, input):
         session = get_session()
-        batch = session.query(ProductionBatch).filter(ProductionBatch.id == id).first()
+        production_plan = session.query(ProductionPlan).filter(ProductionPlan.id == id).first()
         
-        if not batch:
-            return UpdateProductionBatch(
-                production_batch=None,
+        if not production_plan:
+            return UpdateProductionPlan(
+                production_plan=None,
                 success=False,
-                message=f"Batch produksi dengan ID {id} tidak ditemukan"
+                message=f"Production plan with ID {id} not found"
             )
         
-        # Perbarui field batch
-        batch.order_id = input.order_id or batch.order_id
-        batch.product_id = input.product_id
-        batch.quantity = input.quantity
-        batch.priority = input.priority or batch.priority
-        batch.production_plan_id = input.production_plan_id
-        batch.scheduled_start = input.scheduled_start or batch.scheduled_start
-        batch.scheduled_end = input.scheduled_end or batch.scheduled_end
+        # Check material requirements if provided
+        if hasattr(input, 'material_requirements') and input.material_requirements:
+            all_materials_available = True
+            for material_req in input.material_requirements:
+                material_id, quantity = map(int, material_req.split(':'))
+                if not check_material_availability(material_id, quantity):
+                    all_materials_available = False
+                    break
+            
+            if not all_materials_available:
+                return UpdateProductionPlan(
+                    production_plan=None,
+                    success=False,
+                    message="Not all required materials are available in sufficient quantities"
+                )
+        
+        # Update production plan
+        production_plan.name = input.name or production_plan.name
+        production_plan.product_id = input.product_id
+        production_plan.quantity = input.quantity
+        production_plan.priority = input.priority or production_plan.priority
+        production_plan.status = input.status or production_plan.status
+        production_plan.start_date = input.start_date or production_plan.start_date
+        production_plan.end_date = input.end_date or production_plan.end_date
         
         session.commit()
-        session.refresh(batch)
+        session.refresh(production_plan)
         session.close()
         
-        return UpdateProductionBatch(
-            production_batch=batch,
+        return UpdateProductionPlan(
+            production_plan=production_plan,
             success=True,
-            message="Batch produksi berhasil diperbarui"
+            message="Production plan updated successfully"
         )
 
-class StartProductionBatch(graphene.Mutation):
+class DeleteProductionPlan(graphene.Mutation):
     class Arguments:
         id = graphene.Int(required=True)
     
-    production_batch = graphene.Field(lambda: ProductionBatchType)
     success = graphene.Boolean()
     message = graphene.String()
     
     def mutate(self, info, id):
         session = get_session()
-        batch = session.query(ProductionBatch).filter(ProductionBatch.id == id).first()
+        production_plan = session.query(ProductionPlan).filter(ProductionPlan.id == id).first()
         
-        if not batch:
-            return StartProductionBatch(
-                production_batch=None,
-                success=False,
-                message=f"Batch produksi dengan ID {id} tidak ditemukan"
-            )
-        
-        # Periksa apakah batch dapat dimulai
-        if batch.status != 'pending':
-            return StartProductionBatch(
-                production_batch=None,
-                success=False,
-                message=f"Tidak dapat memulai batch dengan status '{batch.status}'"
-            )
-        
-        # Mulai batch
-        batch.status = 'in_progress'
-        batch.actual_start = datetime.datetime.utcnow()
-        
-        # Dapatkan langkah pertama dan tambahkan ke antrian mesin
-        first_step = session.query(ProductionStep).filter(
-            ProductionStep.batch_id == id,
-            ProductionStep.step_number == 1
-        ).first()
-        
-        if first_step:
-            first_step.status = 'in_progress'
-            first_step.start_time = datetime.datetime.utcnow()
-            
-            # Tambahkan ke antrian mesin
-            queue_result = add_to_machine_queue(
-                first_step.id,
-                first_step.machine_type,
-                first_step.start_time,
-                first_step.duration_minutes
-            )
-            
-            if queue_result and queue_result.get('success'):
-                first_step.machine_queue_id = queue_result.get('machineQueueItem', {}).get('id')
-            
-            # Reservasi material
-            step_materials = session.query(StepMaterial).filter(StepMaterial.step_id == first_step.id).all()
-            for material in step_materials:
-                update_material_inventory(
-                    material.material_id,
-                    material.quantity_required,
-                    'out',
-                    f"Batch {batch.batch_number}, Langkah {first_step.step_number}"
+        if production_plan:
+            # Check if plan is already in progress
+            if production_plan.status in ['in_progress', 'completed']:
+                return DeleteProductionPlan(
+                    success=False,
+                    message=f"Cannot delete production plan with status '{production_plan.status}'"
                 )
-                material.is_consumed = True
-        
-        session.commit()
-        session.refresh(batch)
-        session.close()
-        
-        # Kirim pembaruan ke Layanan Umpan Balik Produksi
-        send_production_feedback(batch.id, 'in_progress', 0)
-        
-        return StartProductionBatch(
-            production_batch=batch,
-            success=True,
-            message="Batch produksi berhasil dimulai"
-        )
-
-class CompleteProductionStep(graphene.Mutation):
-    class Arguments:
-        step_id = graphene.Int(required=True)
-        quality_data = graphene.JSONString()
-    
-    production_step = graphene.Field(lambda: ProductionStepType)
-    next_step = graphene.Field(lambda: ProductionStepType)
-    batch_completed = graphene.Boolean()
-    success = graphene.Boolean()
-    message = graphene.String()
-    
-    def mutate(self, info, step_id, quality_data=None):
-        session = get_session()
-        step = session.query(ProductionStep).filter(ProductionStep.id == step_id).first()
-        
-        if not step:
-            return CompleteProductionStep(
-                production_step=None,
-                next_step=None,
-                batch_completed=False,
-                success=False,
-                message=f"Langkah produksi dengan ID {step_id} tidak ditemukan"
+            
+            # Delete associated machine slots
+            session.query(MachineSlot).filter(MachineSlot.production_plan_id == id).delete()
+            
+            # Delete the plan
+            session.delete(production_plan)
+            session.commit()
+            return DeleteProductionPlan(
+                success=True,
+                message="Production plan deleted successfully"
             )
-        
-        # Selesaikan langkah saat ini
-        step.status = 'completed'
-        step.end_time = datetime.datetime.utcnow()
-        
-        # Dapatkan batch
-        batch = session.query(ProductionBatch).filter(ProductionBatch.id == step.batch_id).first()
-        
-        # Dapatkan jumlah total langkah dan langkah yang telah selesai
-        total_steps = session.query(ProductionStep).filter(ProductionStep.batch_id == step.batch_id).count()
-        completed_steps = session.query(ProductionStep).filter(
-            ProductionStep.batch_id == step.batch_id,
-            ProductionStep.status == 'completed'
-        ).count() + 1  # +1 untuk langkah saat ini
-        
-        completion_percentage = (completed_steps / total_steps) * 100 if total_steps > 0 else 0
-        
-        # Periksa apakah ini adalah langkah terakhir
-        batch_completed = False
-        next_step = None
-        
-        if completed_steps >= total_steps:
-            # Selesaikan batch
-            batch.status = 'completed'
-            batch.actual_end = datetime.datetime.utcnow()
-            batch_completed = True
         else:
-            # Dapatkan langkah selanjutnya
-            next_step = session.query(ProductionStep).filter(
-                ProductionStep.batch_id == step.batch_id,
-                ProductionStep.step_number == step.step_number + 1
-            ).first()
-            
-            if next_step:
-                next_step.status = 'in_progress'
-                next_step.start_time = datetime.datetime.utcnow()
-                
-                # Tambahkan ke antrian mesin
-                queue_result = add_to_machine_queue(
-                    next_step.id,
-                    next_step.machine_type,
-                    next_step.start_time,
-                    next_step.duration_minutes
-                )
-                
-                if queue_result and queue_result.get('success'):
-                    next_step.machine_queue_id = queue_result.get('machineQueueItem', {}).get('id')
-                
-                # Reservasi material
-                step_materials = session.query(StepMaterial).filter(StepMaterial.step_id == next_step.id).all()
-                for material in step_materials:
-                    update_material_inventory(
-                        material.material_id,
-                        material.quantity_required,
-                        'out',
-                        f"Batch {batch.batch_number}, Langkah {next_step.step_number}"
-                    )
-                    material.is_consumed = True
-        
-        session.commit()
-        session.refresh(step)
-        if next_step:
-            session.refresh(next_step)
-        session.close()
-        
-        # Kirim pembaruan ke Layanan Umpan Balik Produksi
-        send_production_feedback(
-            batch.id,
-            batch.status,
-            completion_percentage,
-            json.loads(quality_data) if quality_data else None
-        )
-        
-        return CompleteProductionStep(
-            production_step=step,
-            next_step=next_step,
-            batch_completed=batch_completed,
-            success=True,
-            message="Langkah produksi berhasil diselesaikan"
-        )
+            return DeleteProductionPlan(
+                success=False,
+                message=f"Production plan with ID {id} not found"
+            )
 
-class CreateProductDefinition(graphene.Mutation):
+class CreateCapacityPlan(graphene.Mutation):
     class Arguments:
-        input = ProductDefinitionInput(required=True)
+        input = CapacityPlanInput(required=True)
     
-    product_definition = graphene.Field(lambda: ProductDefinitionType)
-    success = graphene.Boolean()
-    message = graphene.String()
+    capacity_plan = graphene.Field(lambda: CapacityPlanType)
     
     def mutate(self, info, input):
         session = get_session()
-        
-        # Periksa apakah definisi produk sudah ada
-        existing = session.query(ProductDefinition).filter(ProductDefinition.product_id == input.product_id).first()
-        if existing:
-            return CreateProductDefinition(
-                product_definition=None,
-                success=False,
-                message=f"Definisi produk untuk ID produk {input.product_id} sudah ada"
-            )
-        
-        # Buat definisi produk
-        product_def = ProductDefinition(
-            product_id=input.product_id,
-            name=input.name,
-            description=input.description,
-            production_workflow=input.production_workflow,
-            standard_batch_size=input.standard_batch_size or 1,
-            is_active=input.is_active if input.is_active is not None else True
+        capacity_plan = CapacityPlan(
+            name=input.name or f"Capacity Plan {input.period_start.strftime('%Y-%m-%d')} to {input.period_end.strftime('%Y-%m-%d')}",
+            period_start=input.period_start,
+            period_end=input.period_end,
+            total_capacity_hours=input.total_capacity_hours,
+            allocated_capacity_hours=input.allocated_capacity_hours or 0,
+            notes=input.notes
         )
-        
-        session.add(product_def)
+        session.add(capacity_plan)
         session.commit()
-        session.refresh(product_def)
+        session.refresh(capacity_plan)
         session.close()
-        
-        return CreateProductDefinition(
-            product_definition=product_def,
-            success=True,
-            message="Definisi produk berhasil dibuat"
-        )
+        return CreateCapacityPlan(capacity_plan=capacity_plan)
 
-class UpdateProductDefinition(graphene.Mutation):
+class UpdateCapacityPlan(graphene.Mutation):
     class Arguments:
         id = graphene.Int(required=True)
-        input = ProductDefinitionInput(required=True)
+        input = CapacityPlanInput(required=True)
     
-    product_definition = graphene.Field(lambda: ProductDefinitionType)
-    success = graphene.Boolean()
-    message = graphene.String()
+    capacity_plan = graphene.Field(lambda: CapacityPlanType)
     
     def mutate(self, info, id, input):
         session = get_session()
-        product_def = session.query(ProductDefinition).filter(ProductDefinition.id == id).first()
+        capacity_plan = session.query(CapacityPlan).filter(CapacityPlan.id == id).first()
         
-        if not product_def:
-            return UpdateProductDefinition(
-                product_definition=None,
-                success=False,
-                message=f"Definisi produk dengan ID {id} tidak ditemukan"
-            )
+        if capacity_plan:
+            capacity_plan.name = input.name or capacity_plan.name
+            capacity_plan.period_start = input.period_start
+            capacity_plan.period_end = input.period_end
+            capacity_plan.total_capacity_hours = input.total_capacity_hours or capacity_plan.total_capacity_hours
+            capacity_plan.allocated_capacity_hours = input.allocated_capacity_hours or capacity_plan.allocated_capacity_hours
+            capacity_plan.notes = input.notes
+            
+            session.commit()
+            session.refresh(capacity_plan)
         
-        # Perbarui definisi produk
-        product_def.product_id = input.product_id
-        product_def.name = input.name
-        product_def.description = input.description or product_def.description
-        product_def.production_workflow = input.production_workflow or product_def.production_workflow
-        product_def.standard_batch_size = input.standard_batch_size or product_def.standard_batch_size
-        product_def.is_active = input.is_active if input.is_active is not None else product_def.is_active
-        
-        session.commit()
-        session.refresh(product_def)
         session.close()
+        return UpdateCapacityPlan(capacity_plan=capacity_plan)
+
+class DeleteCapacityPlan(graphene.Mutation):
+    class Arguments:
+        id = graphene.Int(required=True)
+    
+    success = graphene.Boolean()
+    
+    def mutate(self, info, id):
+        session = get_session()
+        capacity_plan = session.query(CapacityPlan).filter(CapacityPlan.id == id).first()
         
-        return UpdateProductDefinition(
-            product_definition=product_def,
-            success=True,
-            message="Definisi produk berhasil diperbarui"
-        )
+        if capacity_plan:
+            session.delete(capacity_plan)
+            session.commit()
+            success = True
+        else:
+            success = False
+        
+        session.close()
+        return DeleteCapacityPlan(success=success)
 
 class Mutation(graphene.ObjectType):
-    create_production_batch = CreateProductionBatch.Field()
-    update_production_batch = UpdateProductionBatch.Field()
-    start_production_batch = StartProductionBatch.Field()
-    complete_production_step = CompleteProductionStep.Field()
+    create_machine = CreateMachine.Field()
+    update_machine = UpdateMachine.Field()
+    delete_machine = DeleteMachine.Field()
     
-    create_product_definition = CreateProductDefinition.Field()
-    update_product_definition = UpdateProductDefinition.Field()
+    create_machine_slot = CreateMachineSlot.Field()
+    update_machine_slot = UpdateMachineSlot.Field()
+    delete_machine_slot = DeleteMachineSlot.Field()
+    
+    create_production_plan = CreateProductionPlan.Field()
+    update_production_plan = UpdateProductionPlan.Field()
+    delete_production_plan = DeleteProductionPlan.Field()
+    
+    create_capacity_plan = CreateCapacityPlan.Field()
+    update_capacity_plan = UpdateCapacityPlan.Field()
+    delete_capacity_plan = DeleteCapacityPlan.Field()
 
-# Query
+# Queries
 class Query(graphene.ObjectType):
     node = relay.Node.Field()
     
-    # Query batch produksi
-    production_batch = graphene.Field(ProductionBatchType, id=graphene.Int())
-    all_production_batches = graphene.List(ProductionBatchType)
-    production_batches_by_status = graphene.List(ProductionBatchType, status=graphene.String())
-    production_batches_by_product = graphene.List(ProductionBatchType, product_id=graphene.Int())
+    # Machine queries
+    machine = graphene.Field(MachineType, id=graphene.Int())
+    all_machines = graphene.List(MachineType)
+    machines_by_status = graphene.List(MachineType, status=graphene.String())
     
-    # Query langkah produksi
-    production_step = graphene.Field(ProductionStepType, id=graphene.Int())
-    production_steps_by_batch = graphene.List(ProductionStepType, batch_id=graphene.Int())
+    # Machine slot queries
+    machine_slot = graphene.Field(MachineSlotType, id=graphene.Int())
+    machine_slots = graphene.List(MachineSlotType, machine_id=graphene.Int())
+    available_slots = graphene.List(
+        MachineSlotType,
+        start_time=graphene.DateTime(),
+        end_time=graphene.DateTime()
+    )
     
-    # Query definisi produk
-    product_definition = graphene.Field(ProductDefinitionType, id=graphene.Int())
-    product_definition_by_product = graphene.Field(ProductDefinitionType, product_id=graphene.Int())
-    all_product_definitions = graphene.List(ProductDefinitionType)
-    active_product_definitions = graphene.List(ProductDefinitionType)
+    # Production plan queries
+    production_plan = graphene.Field(ProductionPlanType, id=graphene.Int())
+    all_production_plans = graphene.List(ProductionPlanType)
+    production_plans_by_status = graphene.List(ProductionPlanType, status=graphene.String())
     
-    def resolve_production_batch(self, info, id):
+    # Capacity plan queries
+    capacity_plan = graphene.Field(CapacityPlanType, id=graphene.Int())
+    all_capacity_plans = graphene.List(CapacityPlanType)
+    capacity_plans_by_date = graphene.List(
+        CapacityPlanType,
+        date=graphene.DateTime()
+    )
+    
+    def resolve_machine(self, info, id):
         session = get_session()
-        batch = session.query(ProductionBatch).filter(ProductionBatch.id == id).first()
+        machine = session.query(Machine).filter(Machine.id == id).first()
         session.close()
-        return batch
+        return machine
     
-    def resolve_all_production_batches(self, info):
+    def resolve_all_machines(self, info):
         session = get_session()
-        batches = session.query(ProductionBatch).all()
+        machines = session.query(Machine).all()
         session.close()
-        return batches
+        return machines
     
-    def resolve_production_batches_by_status(self, info, status):
+    def resolve_machines_by_status(self, info, status):
         session = get_session()
-        batches = session.query(ProductionBatch).filter(ProductionBatch.status == status).all()
+        machines = session.query(Machine).filter(Machine.status == status).all()
         session.close()
-        return batches
+        return machines
     
-    def resolve_production_batches_by_product(self, info, product_id):
+    def resolve_machine_slot(self, info, id):
         session = get_session()
-        batches = session.query(ProductionBatch).filter(ProductionBatch.product_id == product_id).all()
+        slot = session.query(MachineSlot).filter(MachineSlot.id == id).first()
         session.close()
-        return batches
+        return slot
     
-    def resolve_production_step(self, info, id):
+    def resolve_machine_slots(self, info, machine_id):
         session = get_session()
-        step = session.query(ProductionStep).filter(ProductionStep.id == id).first()
+        slots = session.query(MachineSlot).filter(MachineSlot.machine_id == machine_id).all()
         session.close()
-        return step
+        return slots
     
-    def resolve_production_steps_by_batch(self, info, batch_id):
+    def resolve_available_slots(self, info, start_time=None, end_time=None):
         session = get_session()
-        steps = session.query(ProductionStep).filter(ProductionStep.batch_id == batch_id).order_by(ProductionStep.step_number).all()
+        query = session.query(MachineSlot).filter(MachineSlot.status == 'available')
+        
+        if start_time:
+            query = query.filter(MachineSlot.start_time >= start_time)
+        
+        if end_time:
+            query = query.filter(MachineSlot.end_time <= end_time)
+        
+        slots = query.all()
         session.close()
-        return steps
+        return slots
     
-    def resolve_product_definition(self, info, id):
+    def resolve_production_plan(self, info, id):
         session = get_session()
-        product_def = session.query(ProductDefinition).filter(ProductDefinition.id == id).first()
+        plan = session.query(ProductionPlan).filter(ProductionPlan.id == id).first()
         session.close()
-        return product_def
+        return plan
     
-    def resolve_product_definition_by_product(self, info, product_id):
+    def resolve_all_production_plans(self, info):
         session = get_session()
-        product_def = session.query(ProductDefinition).filter(ProductDefinition.product_id == product_id).first()
+        plans = session.query(ProductionPlan).all()
         session.close()
-        return product_def
+        return plans
     
-    def resolve_all_product_definitions(self, info):
+    def resolve_production_plans_by_status(self, info, status):
         session = get_session()
-        product_defs = session.query(ProductDefinition).all()
+        plans = session.query(ProductionPlan).filter(ProductionPlan.status == status).all()
         session.close()
-        return product_defs
+        return plans
     
-    def resolve_active_product_definitions(self, info):
+    def resolve_capacity_plan(self, info, id):
         session = get_session()
-        product_defs = session.query(ProductDefinition).filter(ProductDefinition.is_active == True).all()
+        plan = session.query(CapacityPlan).filter(CapacityPlan.id == id).first()
         session.close()
-        return product_defs
+        return plan
+    
+    def resolve_all_capacity_plans(self, info):
+        session = get_session()
+        plans = session.query(CapacityPlan).all()
+        session.close()
+        return plans
+    
+    def resolve_capacity_plans_by_date(self, info, date):
+        session = get_session()
+        plans = session.query(CapacityPlan).filter(
+            and_(
+                CapacityPlan.period_start <= date,
+                CapacityPlan.period_end >= date
+            )
+        ).all()
+        session.close()
+        return plans
 
 schema = graphene.Schema(query=Query, mutation=Mutation)
