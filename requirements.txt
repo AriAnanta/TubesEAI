@@ -1,0 +1,14 @@
+flask==2.3.3
+flask-cors==4.0.0
+flask-sqlalchemy==2.5.1
+sqlalchemy==1.4.50
+graphql-core==2.3.2
+graphql-relay==2.0.1
+graphql-server-core==1.2.0
+graphene==2.1.9
+graphene-sqlalchemy==2.3.0
+flask-graphql==2.0.1
+requests==2.31.0
+python-dotenv==1.0.0
+cryptography==41.0.3
+pymysql==1.1.0
