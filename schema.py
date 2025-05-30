@@ -1,7 +1,7 @@
 import graphene
 from graphene import relay
 from graphene_sqlalchemy import SQLAlchemyObjectType, SQLAlchemyConnectionField
-from models import ProductionBatch, ProductionStep, StepMaterial, ProductDefinition, get_session
+from models import ProductionFeedback, ProductionHistory, QualityCheck, MarketplaceNotification, get_session
 from sqlalchemy import desc, and_
 import datetime
 import requests
@@ -9,682 +9,464 @@ import json
 import sys
 import os
 
-# Tambahkan direktori induk ke path untuk mengimpor modul umum
+# Add parent directory to path to import common modules
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from common.config import GRAPHQL_ENDPOINTS
 
-# Definisikan tipe GraphQL
-class ProductionBatchType(SQLAlchemyObjectType):
+# Define GraphQL types
+class ProductionFeedbackType(SQLAlchemyObjectType):
     class Meta:
-        model = ProductionBatch
+        model = ProductionFeedback
         interfaces = (relay.Node, )
 
-class ProductionStepType(SQLAlchemyObjectType):
+class ProductionHistoryType(SQLAlchemyObjectType):
     class Meta:
-        model = ProductionStep
+        model = ProductionHistory
         interfaces = (relay.Node, )
 
-class StepMaterialType(SQLAlchemyObjectType):
+class QualityCheckType(SQLAlchemyObjectType):
     class Meta:
-        model = StepMaterial
+        model = QualityCheck
         interfaces = (relay.Node, )
 
-class ProductDefinitionType(SQLAlchemyObjectType):
+class MarketplaceNotificationType(SQLAlchemyObjectType):
     class Meta:
-        model = ProductDefinition
+        model = MarketplaceNotification
         interfaces = (relay.Node, )
 
-# Tipe input untuk mutasi
-class ProductionBatchInput(graphene.InputObjectType):
-    order_id = graphene.String()
+# Input types for mutations
+class ProductionFeedbackInput(graphene.InputObjectType):
+    batch_id = graphene.Int(required=True)
+    step_id = graphene.Int()
+    status = graphene.String(required=True)
+    completion_percentage = graphene.Float()
+    quality_score = graphene.Float()
+    quality_data = graphene.JSONString()
+    issues = graphene.String()
+
+class ProductionHistoryInput(graphene.InputObjectType):
+    batch_id = graphene.Int(required=True)
+    batch_number = graphene.String()
     product_id = graphene.Int(required=True)
     quantity = graphene.Int(required=True)
-    priority = graphene.Int()
-    production_plan_id = graphene.Int()
-    scheduled_start = graphene.DateTime()
-    scheduled_end = graphene.DateTime()
-
-class ProductionStepInput(graphene.InputObjectType):
-    batch_id = graphene.Int(required=True)
-    step_number = graphene.Int(required=True)
-    name = graphene.String(required=True)
-    machine_type = graphene.String()
-    status = graphene.String()
-    duration_minutes = graphene.Int()
     start_time = graphene.DateTime()
     end_time = graphene.DateTime()
-    machine_queue_id = graphene.Int()
+    duration_minutes = graphene.Int()
+    status = graphene.String(required=True)
+    marketplace_order_id = graphene.String()
     notes = graphene.String()
 
-class StepMaterialInput(graphene.InputObjectType):
-    step_id = graphene.Int(required=True)
-    material_id = graphene.Int(required=True)
-    quantity_required = graphene.Float(required=True)
-    is_consumed = graphene.Boolean()
+class QualityCheckInput(graphene.InputObjectType):
+    batch_id = graphene.Int(required=True)
+    step_id = graphene.Int()
+    check_type = graphene.String(required=True)
+    parameter_name = graphene.String(required=True)
+    expected_value = graphene.String()
+    actual_value = graphene.String()
+    passed = graphene.Boolean(required=True)
+    severity = graphene.Int()
+    notes = graphene.String()
+    checked_by = graphene.String()
 
-class ProductDefinitionInput(graphene.InputObjectType):
-    product_id = graphene.Int(required=True)
-    name = graphene.String(required=True)
-    description = graphene.String()
-    production_workflow = graphene.JSONString()
-    standard_batch_size = graphene.Int()
-    is_active = graphene.Boolean()
+class MarketplaceNotificationInput(graphene.InputObjectType):
+    batch_id = graphene.Int(required=True)
+    marketplace_order_id = graphene.String(required=True)
+    notification_type = graphene.String(required=True)
+    message = graphene.String(required=True)
 
-# Fungsi pembantu untuk berinteraksi dengan layanan lain
-def get_production_plan(plan_id):
-    """Mendapatkan detail rencana produksi dari Layanan Perencanaan Produksi"""
+# Helper functions for interacting with other services
+def get_batch_details(batch_id):
+    """Get batch details from Production Management Service"""
     try:
         query = """
         query($id: Int!) {
-            productionPlan(id: $id) {
+            productionBatch(id: $id) {
                 id
-                name
-                startDate
-                endDate
+                batchNumber
+                orderId
+                productId
+                quantity
                 status
+                actualStart
+                actualEnd
             }
         }
         """
-        variables = {"id": plan_id}
+        variables = {"id": batch_id}
         
-        # Buat permintaan ke Layanan Perencanaan Produksi
+        # Make request to Production Management Service
         response = requests.post(
-            GRAPHQL_ENDPOINTS["production_planning"],
+            GRAPHQL_ENDPOINTS["production_management"],
             json={"query": query, "variables": variables}
         )
         
         data = response.json()
-        if 'data' in data and 'productionPlan' in data['data']:
-            return data['data']['productionPlan']
+        if 'data' in data and 'productionBatch' in data['data']:
+            return data['data']['productionBatch']
         return None
     except Exception as e:
-        print(f"Error saat mengambil rencana produksi: {e}")
+        print(f"Error fetching batch details: {e}")
         return None
 
-def add_to_machine_queue(step_id, machine_type, start_time, duration_minutes):
-    """Menambahkan langkah produksi ke antrian mesin"""
+def notify_marketplace(order_id, status, message):
+    """Send notification to marketplace (dummy implementation)"""
     try:
-        mutation = """
-        mutation($input: AddToQueueInput!) {
-            addToQueue(input: $input) {
-                machineQueueItem {
-                    id
-                }
-                success
-                message
-            }
+        # In a real implementation, this would make an API call to the marketplace
+        # For now, we'll just log it
+        print(f"Marketplace notification for order {order_id}: {status} - {message}")
+        return {
+            "success": True,
+            "message": "Notification sent to marketplace"
         }
-        """
-        variables = {
-            "input": {
-                "productionStepId": step_id,
-                "machineType": machine_type,
-                "startTime": start_time.isoformat() if start_time else None,
-                "durationMinutes": duration_minutes
-            }
-        }
-        
-        # Buat permintaan ke Layanan Antrian Mesin
-        response = requests.post(
-            GRAPHQL_ENDPOINTS["machine_queue"],
-            json={"query": mutation, "variables": variables}
-        )
-        
-        data = response.json()
-        if 'data' in data and 'addToQueue' in data['data']:
-            return data['data']['addToQueue']
-        return None
     except Exception as e:
-        print(f"Error saat menambah ke antrian mesin: {e}")
-        return None
+        print(f"Error notifying marketplace: {e}")
+        return {
+            "success": False,
+            "message": f"Error: {str(e)}"
+        }
 
-def update_material_inventory(material_id, quantity, transaction_type, reference):
-    """Memperbarui inventori material ketika material dikonsumsi"""
-    try:
-        mutation = """
-        mutation($input: MaterialTransactionInput!) {
-            createMaterialTransaction(input: $input) {
-                materialTransaction {
-                    id
-                }
-                material {
-                    id
-                    quantity
-                }
-            }
-        }
-        """
-        variables = {
-            "input": {
-                "materialId": material_id,
-                "transactionType": transaction_type,
-                "quantity": quantity,
-                "reference": reference
-            }
-        }
-        
-        # Buat permintaan ke Layanan Inventori Material
-        response = requests.post(
-            GRAPHQL_ENDPOINTS["material_inventory"],
-            json={"query": mutation, "variables": variables}
-        )
-        
-        data = response.json()
-        if 'data' in data and 'createMaterialTransaction' in data['data']:
-            return data['data']['createMaterialTransaction']
-        return None
-    except Exception as e:
-        print(f"Error saat memperbarui inventori material: {e}")
-        return None
-
-def send_production_feedback(batch_id, status, completion_percentage, quality_data=None):
-    """Mengirim pembaruan status produksi ke Layanan Umpan Balik Produksi"""
-    try:
-        mutation = """
-        mutation($input: ProductionFeedbackInput!) {
-            createProductionFeedback(input: $input) {
-                productionFeedback {
-                    id
-                }
-                success
-                message
-            }
-        }
-        """
-        variables = {
-            "input": {
-                "batchId": batch_id,
-                "status": status,
-                "completionPercentage": completion_percentage,
-                "qualityData": json.dumps(quality_data) if quality_data else None
-            }
-        }
-        
-        # Buat permintaan ke Layanan Umpan Balik Produksi
-        response = requests.post(
-            GRAPHQL_ENDPOINTS["production_feedback"],
-            json={"query": mutation, "variables": variables}
-        )
-        
-        data = response.json()
-        if 'data' in data and 'createProductionFeedback' in data['data']:
-            return data['data']['createProductionFeedback']
-        return None
-    except Exception as e:
-        print(f"Error saat mengirim umpan balik produksi: {e}")
-        return None
-
-# Mutasi
-class CreateProductionBatch(graphene.Mutation):
+# Mutations
+class CreateProductionFeedback(graphene.Mutation):
     class Arguments:
-        input = ProductionBatchInput(required=True)
+        input = ProductionFeedbackInput(required=True)
     
-    production_batch = graphene.Field(lambda: ProductionBatchType)
+    production_feedback = graphene.Field(lambda: ProductionFeedbackType)
     success = graphene.Boolean()
     message = graphene.String()
     
     def mutate(self, info, input):
         session = get_session()
         
-        # Buat nomor batch
-        batch_number = f"BATCH-{datetime.datetime.now().strftime('%Y%m%d')}-{input.product_id}-{input.quantity}"
-        
-        # Periksa rencana produksi jika disediakan
-        if input.production_plan_id:
-            plan = get_production_plan(input.production_plan_id)
-            if not plan:
-                return CreateProductionBatch(
-                    production_batch=None,
-                    success=False,
-                    message=f"Rencana produksi dengan ID {input.production_plan_id} tidak ditemukan"
-                )
-        
-        # Buat batch produksi
-        batch = ProductionBatch(
-            batch_number=batch_number,
-            order_id=input.order_id,
-            product_id=input.product_id,
-            quantity=input.quantity,
-            priority=input.priority or 1,
-            status='pending',
-            production_plan_id=input.production_plan_id,
-            scheduled_start=input.scheduled_start,
-            scheduled_end=input.scheduled_end
+        # Create production feedback
+        feedback = ProductionFeedback(
+            batch_id=input.batch_id,
+            step_id=input.step_id,
+            status=input.status,
+            completion_percentage=input.completion_percentage or 0,
+            quality_score=input.quality_score,
+            quality_data=input.quality_data,
+            issues=input.issues
         )
         
-        session.add(batch)
+        session.add(feedback)
         session.commit()
-        session.refresh(batch)
+        session.refresh(feedback)
         
-        # Dapatkan definisi produk untuk membuat langkah-langkah
-        product_def = session.query(ProductDefinition).filter(ProductDefinition.product_id == input.product_id).first()
-        
-        if product_def and product_def.production_workflow:
-            try:
-                workflow = json.loads(product_def.production_workflow) if isinstance(product_def.production_workflow, str) else product_def.production_workflow
+        # If status is 'completed', add to production history
+        if input.status == 'completed' and not input.step_id:  # Only for batch-level completion
+            batch_details = get_batch_details(input.batch_id)
+            
+            if batch_details:
+                # Calculate duration
+                duration_minutes = None
+                if batch_details.get('actualStart') and batch_details.get('actualEnd'):
+                    start = datetime.datetime.fromisoformat(batch_details['actualStart'].replace('Z', '+00:00'))
+                    end = datetime.datetime.fromisoformat(batch_details['actualEnd'].replace('Z', '+00:00'))
+                    duration_minutes = int((end - start).total_seconds() / 60)
                 
-                # Buat langkah produksi berdasarkan alur kerja
-                for step_index, step_def in enumerate(workflow.get('steps', [])):
-                    step = ProductionStep(
-                        batch_id=batch.id,
-                        step_number=step_index + 1,
-                        name=step_def.get('name', f"Langkah {step_index + 1}"),
-                        machine_type=step_def.get('machine_type'),
-                        status='pending',
-                        duration_minutes=step_def.get('duration_minutes')
-                    )
-                    session.add(step)
-                    session.flush()  # Dapatkan ID langkah
-                    
-                    # Tambahkan material untuk langkah
-                    for material in step_def.get('materials', []):
-                        step_material = StepMaterial(
-                            step_id=step.id,
-                            material_id=material.get('material_id'),
-                            quantity_required=material.get('quantity') * input.quantity
-                        )
-                        session.add(step_material)
+                # Create production history record
+                history = ProductionHistory(
+                    batch_id=input.batch_id,
+                    batch_number=batch_details.get('batchNumber'),
+                    product_id=batch_details.get('productId'),
+                    quantity=batch_details.get('quantity'),
+                    start_time=batch_details.get('actualStart'),
+                    end_time=batch_details.get('actualEnd'),
+                    duration_minutes=duration_minutes,
+                    status=input.status,
+                    marketplace_order_id=batch_details.get('orderId'),
+                    notes=input.issues
+                )
                 
+                session.add(history)
                 session.commit()
-            except Exception as e:
-                print(f"Error saat membuat langkah produksi: {e}")
+                
+                # Create marketplace notification
+                if batch_details.get('orderId'):
+                    notification = MarketplaceNotification(
+                        batch_id=input.batch_id,
+                        marketplace_order_id=batch_details.get('orderId'),
+                        notification_type='status_update',
+                        message=f"Production completed for batch {batch_details.get('batchNumber')}. Quality score: {input.quality_score or 'N/A'}"
+                    )
+                    
+                    session.add(notification)
+                    session.commit()
         
         session.close()
         
-        # Kirim umpan balik awal ke Layanan Umpan Balik Produksi
-        send_production_feedback(batch.id, 'pending', 0)
-        
-        return CreateProductionBatch(
-            production_batch=batch,
+        return CreateProductionFeedback(
+            production_feedback=feedback,
             success=True,
-            message="Batch produksi berhasil dibuat"
+            message="Production feedback recorded successfully"
         )
 
-class UpdateProductionBatch(graphene.Mutation):
+class CreateQualityCheck(graphene.Mutation):
     class Arguments:
-        id = graphene.Int(required=True)
-        input = ProductionBatchInput(required=True)
+        input = QualityCheckInput(required=True)
     
-    production_batch = graphene.Field(lambda: ProductionBatchType)
+    quality_check = graphene.Field(lambda: QualityCheckType)
     success = graphene.Boolean()
     message = graphene.String()
     
-    def mutate(self, info, id, input):
+    def mutate(self, info, input):
         session = get_session()
-        batch = session.query(ProductionBatch).filter(ProductionBatch.id == id).first()
         
-        if not batch:
-            return UpdateProductionBatch(
-                production_batch=None,
-                success=False,
-                message=f"Batch produksi dengan ID {id} tidak ditemukan"
-            )
+        # Create quality check
+        check = QualityCheck(
+            batch_id=input.batch_id,
+            step_id=input.step_id,
+            check_type=input.check_type,
+            parameter_name=input.parameter_name,
+            expected_value=input.expected_value,
+            actual_value=input.actual_value,
+            passed=input.passed,
+            severity=input.severity,
+            notes=input.notes,
+            checked_by=input.checked_by or 'system'
+        )
         
-        # Perbarui field batch
-        batch.order_id = input.order_id or batch.order_id
-        batch.product_id = input.product_id
-        batch.quantity = input.quantity
-        batch.priority = input.priority or batch.priority
-        batch.production_plan_id = input.production_plan_id
-        batch.scheduled_start = input.scheduled_start or batch.scheduled_start
-        batch.scheduled_end = input.scheduled_end or batch.scheduled_end
-        
+        session.add(check)
         session.commit()
-        session.refresh(batch)
+        session.refresh(check)
+        
+        # If quality check failed with high severity, create a marketplace notification
+        if not input.passed and input.severity == 3:  # High severity
+            batch_details = get_batch_details(input.batch_id)
+            
+            if batch_details and batch_details.get('orderId'):
+                notification = MarketplaceNotification(
+                    batch_id=input.batch_id,
+                    marketplace_order_id=batch_details.get('orderId'),
+                    notification_type='quality_issue',
+                    message=f"Quality issue detected in batch {batch_details.get('batchNumber')}: {input.parameter_name} failed quality check. {input.notes or ''}"
+                )
+                
+                session.add(notification)
+                session.commit()
+        
         session.close()
         
-        return UpdateProductionBatch(
-            production_batch=batch,
+        return CreateQualityCheck(
+            quality_check=check,
             success=True,
-            message="Batch produksi berhasil diperbarui"
+            message="Quality check recorded successfully"
         )
 
-class StartProductionBatch(graphene.Mutation):
+class CreateMarketplaceNotification(graphene.Mutation):
+    class Arguments:
+        input = MarketplaceNotificationInput(required=True)
+    
+    marketplace_notification = graphene.Field(lambda: MarketplaceNotificationType)
+    success = graphene.Boolean()
+    message = graphene.String()
+    
+    def mutate(self, info, input):
+        session = get_session()
+        
+        # Create marketplace notification
+        notification = MarketplaceNotification(
+            batch_id=input.batch_id,
+            marketplace_order_id=input.marketplace_order_id,
+            notification_type=input.notification_type,
+            message=input.message
+        )
+        
+        session.add(notification)
+        session.commit()
+        session.refresh(notification)
+        session.close()
+        
+        return CreateMarketplaceNotification(
+            marketplace_notification=notification,
+            success=True,
+            message="Marketplace notification created successfully"
+        )
+
+class SendMarketplaceNotification(graphene.Mutation):
     class Arguments:
         id = graphene.Int(required=True)
     
-    production_batch = graphene.Field(lambda: ProductionBatchType)
+    marketplace_notification = graphene.Field(lambda: MarketplaceNotificationType)
     success = graphene.Boolean()
     message = graphene.String()
     
     def mutate(self, info, id):
         session = get_session()
-        batch = session.query(ProductionBatch).filter(ProductionBatch.id == id).first()
+        notification = session.query(MarketplaceNotification).filter(MarketplaceNotification.id == id).first()
         
-        if not batch:
-            return StartProductionBatch(
-                production_batch=None,
+        if not notification:
+            return SendMarketplaceNotification(
+                marketplace_notification=None,
                 success=False,
-                message=f"Batch produksi dengan ID {id} tidak ditemukan"
+                message=f"Notification with ID {id} not found"
             )
         
-        # Periksa apakah batch dapat dimulai
-        if batch.status != 'pending':
-            return StartProductionBatch(
-                production_batch=None,
+        if notification.sent:
+            return SendMarketplaceNotification(
+                marketplace_notification=notification,
                 success=False,
-                message=f"Tidak dapat memulai batch dengan status '{batch.status}'"
+                message=f"Notification already sent at {notification.sent_at}"
             )
         
-        # Mulai batch
-        batch.status = 'in_progress'
-        batch.actual_start = datetime.datetime.utcnow()
+        # Send notification to marketplace
+        result = notify_marketplace(
+            notification.marketplace_order_id,
+            notification.notification_type,
+            notification.message
+        )
         
-        # Dapatkan langkah pertama dan tambahkan ke antrian mesin
-        first_step = session.query(ProductionStep).filter(
-            ProductionStep.batch_id == id,
-            ProductionStep.step_number == 1
-        ).first()
-        
-        if first_step:
-            first_step.status = 'in_progress'
-            first_step.start_time = datetime.datetime.utcnow()
-            
-            # Tambahkan ke antrian mesin
-            queue_result = add_to_machine_queue(
-                first_step.id,
-                first_step.machine_type,
-                first_step.start_time,
-                first_step.duration_minutes
-            )
-            
-            if queue_result and queue_result.get('success'):
-                first_step.machine_queue_id = queue_result.get('machineQueueItem', {}).get('id')
-            
-            # Reservasi material
-            step_materials = session.query(StepMaterial).filter(StepMaterial.step_id == first_step.id).all()
-            for material in step_materials:
-                update_material_inventory(
-                    material.material_id,
-                    material.quantity_required,
-                    'out',
-                    f"Batch {batch.batch_number}, Langkah {first_step.step_number}"
-                )
-                material.is_consumed = True
+        # Update notification status
+        notification.sent = result.get('success', False)
+        notification.sent_at = datetime.datetime.utcnow()
+        notification.error_message = None if result.get('success') else result.get('message')
         
         session.commit()
-        session.refresh(batch)
+        session.refresh(notification)
         session.close()
         
-        # Kirim pembaruan ke Layanan Umpan Balik Produksi
-        send_production_feedback(batch.id, 'in_progress', 0)
-        
-        return StartProductionBatch(
-            production_batch=batch,
-            success=True,
-            message="Batch produksi berhasil dimulai"
-        )
-
-class CompleteProductionStep(graphene.Mutation):
-    class Arguments:
-        step_id = graphene.Int(required=True)
-        quality_data = graphene.JSONString()
-    
-    production_step = graphene.Field(lambda: ProductionStepType)
-    next_step = graphene.Field(lambda: ProductionStepType)
-    batch_completed = graphene.Boolean()
-    success = graphene.Boolean()
-    message = graphene.String()
-    
-    def mutate(self, info, step_id, quality_data=None):
-        session = get_session()
-        step = session.query(ProductionStep).filter(ProductionStep.id == step_id).first()
-        
-        if not step:
-            return CompleteProductionStep(
-                production_step=None,
-                next_step=None,
-                batch_completed=False,
-                success=False,
-                message=f"Langkah produksi dengan ID {step_id} tidak ditemukan"
-            )
-        
-        # Selesaikan langkah saat ini
-        step.status = 'completed'
-        step.end_time = datetime.datetime.utcnow()
-        
-        # Dapatkan batch
-        batch = session.query(ProductionBatch).filter(ProductionBatch.id == step.batch_id).first()
-        
-        # Dapatkan jumlah total langkah dan langkah yang telah selesai
-        total_steps = session.query(ProductionStep).filter(ProductionStep.batch_id == step.batch_id).count()
-        completed_steps = session.query(ProductionStep).filter(
-            ProductionStep.batch_id == step.batch_id,
-            ProductionStep.status == 'completed'
-        ).count() + 1  # +1 untuk langkah saat ini
-        
-        completion_percentage = (completed_steps / total_steps) * 100 if total_steps > 0 else 0
-        
-        # Periksa apakah ini adalah langkah terakhir
-        batch_completed = False
-        next_step = None
-        
-        if completed_steps >= total_steps:
-            # Selesaikan batch
-            batch.status = 'completed'
-            batch.actual_end = datetime.datetime.utcnow()
-            batch_completed = True
-        else:
-            # Dapatkan langkah selanjutnya
-            next_step = session.query(ProductionStep).filter(
-                ProductionStep.batch_id == step.batch_id,
-                ProductionStep.step_number == step.step_number + 1
-            ).first()
-            
-            if next_step:
-                next_step.status = 'in_progress'
-                next_step.start_time = datetime.datetime.utcnow()
-                
-                # Tambahkan ke antrian mesin
-                queue_result = add_to_machine_queue(
-                    next_step.id,
-                    next_step.machine_type,
-                    next_step.start_time,
-                    next_step.duration_minutes
-                )
-                
-                if queue_result and queue_result.get('success'):
-                    next_step.machine_queue_id = queue_result.get('machineQueueItem', {}).get('id')
-                
-                # Reservasi material
-                step_materials = session.query(StepMaterial).filter(StepMaterial.step_id == next_step.id).all()
-                for material in step_materials:
-                    update_material_inventory(
-                        material.material_id,
-                        material.quantity_required,
-                        'out',
-                        f"Batch {batch.batch_number}, Langkah {next_step.step_number}"
-                    )
-                    material.is_consumed = True
-        
-        session.commit()
-        session.refresh(step)
-        if next_step:
-            session.refresh(next_step)
-        session.close()
-        
-        # Kirim pembaruan ke Layanan Umpan Balik Produksi
-        send_production_feedback(
-            batch.id,
-            batch.status,
-            completion_percentage,
-            json.loads(quality_data) if quality_data else None
-        )
-        
-        return CompleteProductionStep(
-            production_step=step,
-            next_step=next_step,
-            batch_completed=batch_completed,
-            success=True,
-            message="Langkah produksi berhasil diselesaikan"
-        )
-
-class CreateProductDefinition(graphene.Mutation):
-    class Arguments:
-        input = ProductDefinitionInput(required=True)
-    
-    product_definition = graphene.Field(lambda: ProductDefinitionType)
-    success = graphene.Boolean()
-    message = graphene.String()
-    
-    def mutate(self, info, input):
-        session = get_session()
-        
-        # Periksa apakah definisi produk sudah ada
-        existing = session.query(ProductDefinition).filter(ProductDefinition.product_id == input.product_id).first()
-        if existing:
-            return CreateProductDefinition(
-                product_definition=None,
-                success=False,
-                message=f"Definisi produk untuk ID produk {input.product_id} sudah ada"
-            )
-        
-        # Buat definisi produk
-        product_def = ProductDefinition(
-            product_id=input.product_id,
-            name=input.name,
-            description=input.description,
-            production_workflow=input.production_workflow,
-            standard_batch_size=input.standard_batch_size or 1,
-            is_active=input.is_active if input.is_active is not None else True
-        )
-        
-        session.add(product_def)
-        session.commit()
-        session.refresh(product_def)
-        session.close()
-        
-        return CreateProductDefinition(
-            product_definition=product_def,
-            success=True,
-            message="Definisi produk berhasil dibuat"
-        )
-
-class UpdateProductDefinition(graphene.Mutation):
-    class Arguments:
-        id = graphene.Int(required=True)
-        input = ProductDefinitionInput(required=True)
-    
-    product_definition = graphene.Field(lambda: ProductDefinitionType)
-    success = graphene.Boolean()
-    message = graphene.String()
-    
-    def mutate(self, info, id, input):
-        session = get_session()
-        product_def = session.query(ProductDefinition).filter(ProductDefinition.id == id).first()
-        
-        if not product_def:
-            return UpdateProductDefinition(
-                product_definition=None,
-                success=False,
-                message=f"Definisi produk dengan ID {id} tidak ditemukan"
-            )
-        
-        # Perbarui definisi produk
-        product_def.product_id = input.product_id
-        product_def.name = input.name
-        product_def.description = input.description or product_def.description
-        product_def.production_workflow = input.production_workflow or product_def.production_workflow
-        product_def.standard_batch_size = input.standard_batch_size or product_def.standard_batch_size
-        product_def.is_active = input.is_active if input.is_active is not None else product_def.is_active
-        
-        session.commit()
-        session.refresh(product_def)
-        session.close()
-        
-        return UpdateProductDefinition(
-            product_definition=product_def,
-            success=True,
-            message="Definisi produk berhasil diperbarui"
+        return SendMarketplaceNotification(
+            marketplace_notification=notification,
+            success=result.get('success', False),
+            message=result.get('message', "Unknown error")
         )
 
 class Mutation(graphene.ObjectType):
-    create_production_batch = CreateProductionBatch.Field()
-    update_production_batch = UpdateProductionBatch.Field()
-    start_production_batch = StartProductionBatch.Field()
-    complete_production_step = CompleteProductionStep.Field()
-    
-    create_product_definition = CreateProductDefinition.Field()
-    update_product_definition = UpdateProductDefinition.Field()
+    create_production_feedback = CreateProductionFeedback.Field()
+    create_quality_check = CreateQualityCheck.Field()
+    create_marketplace_notification = CreateMarketplaceNotification.Field()
+    send_marketplace_notification = SendMarketplaceNotification.Field()
 
-# Query
+# Queries
 class Query(graphene.ObjectType):
     node = relay.Node.Field()
     
-    # Query batch produksi
-    production_batch = graphene.Field(ProductionBatchType, id=graphene.Int())
-    all_production_batches = graphene.List(ProductionBatchType)
-    production_batches_by_status = graphene.List(ProductionBatchType, status=graphene.String())
-    production_batches_by_product = graphene.List(ProductionBatchType, product_id=graphene.Int())
+    # Production feedback queries
+    production_feedback = graphene.Field(ProductionFeedbackType, id=graphene.Int())
+    production_feedbacks_by_batch = graphene.List(ProductionFeedbackType, batch_id=graphene.Int())
+    latest_feedback_by_batch = graphene.Field(ProductionFeedbackType, batch_id=graphene.Int())
     
-    # Query langkah produksi
-    production_step = graphene.Field(ProductionStepType, id=graphene.Int())
-    production_steps_by_batch = graphene.List(ProductionStepType, batch_id=graphene.Int())
+    # Production history queries
+    production_history = graphene.Field(ProductionHistoryType, id=graphene.Int())
+    production_histories_by_product = graphene.List(
+        ProductionHistoryType, 
+        product_id=graphene.Int(),
+        start_date=graphene.String(),
+        end_date=graphene.String()
+    )
+    recent_production_histories = graphene.List(ProductionHistoryType, limit=graphene.Int())
     
-    # Query definisi produk
-    product_definition = graphene.Field(ProductDefinitionType, id=graphene.Int())
-    product_definition_by_product = graphene.Field(ProductDefinitionType, product_id=graphene.Int())
-    all_product_definitions = graphene.List(ProductDefinitionType)
-    active_product_definitions = graphene.List(ProductDefinitionType)
+    # Quality check queries
+    quality_check = graphene.Field(QualityCheckType, id=graphene.Int())
+    quality_checks_by_batch = graphene.List(QualityCheckType, batch_id=graphene.Int())
+    failed_quality_checks = graphene.List(QualityCheckType, batch_id=graphene.Int())
     
-    def resolve_production_batch(self, info, id):
+    # Marketplace notification queries
+    marketplace_notification = graphene.Field(MarketplaceNotificationType, id=graphene.Int())
+    marketplace_notifications_by_order = graphene.List(
+        MarketplaceNotificationType, 
+        marketplace_order_id=graphene.String()
+    )
+    unsent_marketplace_notifications = graphene.List(MarketplaceNotificationType)
+    
+    def resolve_production_feedback(self, info, id):
         session = get_session()
-        batch = session.query(ProductionBatch).filter(ProductionBatch.id == id).first()
+        feedback = session.query(ProductionFeedback).filter(ProductionFeedback.id == id).first()
         session.close()
-        return batch
+        return feedback
     
-    def resolve_all_production_batches(self, info):
+    def resolve_production_feedbacks_by_batch(self, info, batch_id):
         session = get_session()
-        batches = session.query(ProductionBatch).all()
+        feedbacks = session.query(ProductionFeedback).filter(
+            ProductionFeedback.batch_id == batch_id
+        ).order_by(ProductionFeedback.timestamp).all()
         session.close()
-        return batches
+        return feedbacks
     
-    def resolve_production_batches_by_status(self, info, status):
+    def resolve_latest_feedback_by_batch(self, info, batch_id):
         session = get_session()
-        batches = session.query(ProductionBatch).filter(ProductionBatch.status == status).all()
+        feedback = session.query(ProductionFeedback).filter(
+            ProductionFeedback.batch_id == batch_id
+        ).order_by(desc(ProductionFeedback.timestamp)).first()
         session.close()
-        return batches
+        return feedback
     
-    def resolve_production_batches_by_product(self, info, product_id):
+    def resolve_production_history(self, info, id):
         session = get_session()
-        batches = session.query(ProductionBatch).filter(ProductionBatch.product_id == product_id).all()
+        history = session.query(ProductionHistory).filter(ProductionHistory.id == id).first()
         session.close()
-        return batches
+        return history
     
-    def resolve_production_step(self, info, id):
+    def resolve_production_histories_by_product(self, info, product_id, start_date=None, end_date=None):
         session = get_session()
-        step = session.query(ProductionStep).filter(ProductionStep.id == id).first()
+        query = session.query(ProductionHistory).filter(ProductionHistory.product_id == product_id)
+        
+        if start_date:
+            start = datetime.datetime.strptime(start_date, '%Y-%m-%d')
+            query = query.filter(ProductionHistory.end_time >= start)
+        
+        if end_date:
+            end = datetime.datetime.strptime(end_date, '%Y-%m-%d')
+            end = end.replace(hour=23, minute=59, second=59)
+            query = query.filter(ProductionHistory.end_time <= end)
+        
+        histories = query.order_by(desc(ProductionHistory.end_time)).all()
         session.close()
-        return step
+        return histories
     
-    def resolve_production_steps_by_batch(self, info, batch_id):
+    def resolve_recent_production_histories(self, info, limit=10):
         session = get_session()
-        steps = session.query(ProductionStep).filter(ProductionStep.batch_id == batch_id).order_by(ProductionStep.step_number).all()
+        histories = session.query(ProductionHistory).order_by(
+            desc(ProductionHistory.created_at)
+        ).limit(limit).all()
         session.close()
-        return steps
+        return histories
     
-    def resolve_product_definition(self, info, id):
+    def resolve_quality_check(self, info, id):
         session = get_session()
-        product_def = session.query(ProductDefinition).filter(ProductDefinition.id == id).first()
+        check = session.query(QualityCheck).filter(QualityCheck.id == id).first()
         session.close()
-        return product_def
+        return check
     
-    def resolve_product_definition_by_product(self, info, product_id):
+    def resolve_quality_checks_by_batch(self, info, batch_id):
         session = get_session()
-        product_def = session.query(ProductDefinition).filter(ProductDefinition.product_id == product_id).first()
+        checks = session.query(QualityCheck).filter(
+            QualityCheck.batch_id == batch_id
+        ).order_by(QualityCheck.timestamp).all()
         session.close()
-        return product_def
+        return checks
     
-    def resolve_all_product_definitions(self, info):
+    def resolve_failed_quality_checks(self, info, batch_id=None):
         session = get_session()
-        product_defs = session.query(ProductDefinition).all()
+        query = session.query(QualityCheck).filter(QualityCheck.passed == False)
+        
+        if batch_id:
+            query = query.filter(QualityCheck.batch_id == batch_id)
+        
+        checks = query.order_by(desc(QualityCheck.timestamp)).all()
         session.close()
-        return product_defs
+        return checks
     
-    def resolve_active_product_definitions(self, info):
+    def resolve_marketplace_notification(self, info, id):
         session = get_session()
-        product_defs = session.query(ProductDefinition).filter(ProductDefinition.is_active == True).all()
+        notification = session.query(MarketplaceNotification).filter(MarketplaceNotification.id == id).first()
         session.close()
-        return product_defs
+        return notification
+    
+    def resolve_marketplace_notifications_by_order(self, info, marketplace_order_id):
+        session = get_session()
+        notifications = session.query(MarketplaceNotification).filter(
+            MarketplaceNotification.marketplace_order_id == marketplace_order_id
+        ).order_by(desc(MarketplaceNotification.created_at)).all()
+        session.close()
+        return notifications
+    
+    def resolve_unsent_marketplace_notifications(self, info):
+        session = get_session()
+        notifications = session.query(MarketplaceNotification).filter(
+            MarketplaceNotification.sent == False
+        ).order_by(MarketplaceNotification.created_at).all()
+        session.close()
+        return notifications
 
 schema = graphene.Schema(query=Query, mutation=Mutation)
